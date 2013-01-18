@@ -77,17 +77,15 @@ getLinksFrom200Response url (Response _ _ headers markup) =
         linkFromMetaTag = Nothing -- XXX Implement me!
 
 getLinksFrom3xxResponse :: URI -> Response BL.ByteString -> [URI]
-getLinksFrom3xxResponse _ (Response _ _ headers _) = maybeToList $ do
+getLinksFrom3xxResponse _ (Response _ _ headers _) = maybeToList $
     lookup hLocation headers >>= parseAbsoluteURI . B.unpack
 
 getLinksFromResponse :: URI -> Response BL.ByteString -> [URI]
 getLinksFromResponse url r@(Response status _ _ _)
-    | status == status200 = getLinksFrom200Response url r
-    | status == status301 ||
-      status == status302 ||
-      status == status307 = getLinksFrom3xxResponse url r
-    | status == status404 = []
-    | otherwise           = error (show r)
+    | status == status200                             = getLinksFrom200Response url r
+    | status `elem` [status301, status302, status307] = getLinksFrom3xxResponse url r
+    | status == status404                             = []
+    | otherwise                                       = error (show r)
 
 getURL :: Manager -> URI -> IO (Response BL.ByteString)
 getURL mgr url = do
@@ -104,7 +102,7 @@ getLinksForURL mgr url = do
         normalizedURI :: URI -> URI
         normalizedURI uri = uri { uriFragment = "" }
 
-workerThread :: TChan (Maybe URI) -> MVar (S.Set URI) -> MVar Int -> [(URI -> Bool)] -> Manager -> IO ()
+workerThread :: TChan (Maybe URI) -> MVar (S.Set URI) -> MVar Int -> [URI -> Bool] -> Manager -> IO ()
 workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr = do
     -- Fetch next URI to crawl from the queue
     item <- atomically $ readTChan uriQueue
@@ -128,14 +126,14 @@ workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr = do
 
             -- Weed out those links which we already visited
             seenURIs <- takeMVar seenURIsMV
-            let unseenLinks = filter (\u -> u `S.notMember` seenURIs) acceptableLinks
-            putMVar seenURIsMV $ seenURIs `S.union` (S.fromList unseenLinks)
+            let unseenLinks = filter (`S.notMember` seenURIs) acceptableLinks
+            putMVar seenURIsMV $ seenURIs `S.union` S.fromList unseenLinks
 
             threadId <- myThreadId
             when debug (putStrLn $ show threadId ++ ": Crawled " ++ show uri ++ ": " ++ show (length links) ++ " links, " ++ show (length acceptableLinks) ++ " acceptable, " ++ show (length unseenLinks) ++ " unseen")
 
             -- Append all unseen links to our queue
-            sequence_ . map atomically . map (writeTChan uriQueue) . map Just $ unseenLinks
+            mapM_ (atomically . writeTChan uriQueue . Just) unseenLinks
 
             -- Decrease the number of active workers to indicate that this
             -- one won't be producing any new elements for the queue...
@@ -148,18 +146,17 @@ workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr = do
             -- of URIs: Nothing. It will wake up other worker threads which,
             -- when processing Nothing, will terminate.
             queueEmpty <- atomically $ isEmptyTChan uriQueue
-            when (queueEmpty && newActiveWorkerCount == 0) $ do
+            when (queueEmpty && newActiveWorkerCount == 0) $
                 atomically $ writeTChan uriQueue Nothing
             workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr
 
-        Nothing -> do
-            atomically $ writeTChan uriQueue Nothing
+        Nothing -> atomically $ writeTChan uriQueue Nothing
 
 hostName :: URI -> Maybe String
-hostName uri = uriRegName `fmap` (uriAuthority uri)
+hostName uri = uriRegName `fmap` uriAuthority uri
 
-satisfiesAll :: [(a -> Bool)] -> a -> Bool
-satisfiesAll preds x = and . map ($ x) $ preds
+satisfiesAll :: [a -> Bool] -> a -> Bool
+satisfiesAll preds x = all ($ x) preds
 
 forkWorkerThread :: IO () -> IO (MVar ())
 forkWorkerThread io = do
@@ -167,23 +164,23 @@ forkWorkerThread io = do
     _ <- forkFinally io (\_ -> putMVar handle ())
     return handle
 
-crawl :: URI -> [(URI -> Bool)] -> Int -> IO [URI]
+crawl :: URI -> [URI -> Bool] -> Int -> IO [URI]
 crawl uri uriTests numThreads =
     withSocketsDo $ bracket (newManager def) closeManager $ \mgr -> do
-        uriQueue <- atomically $ newTChan
+        uriQueue <- atomically newTChan
         seenURIsMV <- newMVar S.empty
         activeWorkersMV <- newMVar 0
 
         atomically $ writeTChan uriQueue $ Just uri
 
         let thread = workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr
-        threads <- sequence . map forkWorkerThread . replicate numThreads $ thread
+        threads <- mapM forkWorkerThread . replicate numThreads $ thread
 
         -- Wait on all clients to finish
-        sequence_ $ map takeMVar threads
+        mapM_ takeMVar threads
 
         seenURIs <- takeMVar seenURIsMV
-        unseenURIs <- (atomically $ readTChan uriQueue) `untilM` (atomically $ isEmptyTChan uriQueue)
+        unseenURIs <- atomically (readTChan uriQueue) `untilM` atomically (isEmptyTChan uriQueue)
 
         return $ S.toList seenURIs ++ catMaybes unseenURIs
 
@@ -208,6 +205,6 @@ main = do
 
                 putStrLn $ "Got " ++ show (length links) ++ " links:"
                 putStr $ unlines $ map uriAsString links
-            Nothing -> putStr $ "Not a valid URI!"
+            Nothing -> putStrLn "Not a valid URI!"
 
 
