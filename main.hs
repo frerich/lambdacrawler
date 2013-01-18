@@ -1,15 +1,13 @@
 -- TODO: Clean up imports
 import Control.Concurrent
-import Control.Concurrent.Chan
-import Control.Concurrent.MVar
 import Control.Exception (bracket, mask, try, SomeException)
-import Control.Monad (when, foldM)
+import Control.Monad (when)
 import Control.Monad.Loops (untilM)
 import qualified Data.CaseInsensitive as CI
 import Data.Conduit (runResourceT)
 import Data.List (nub)
 import Data.Function (on)
-import Data.Maybe (fromJust, maybeToList, catMaybes)
+import Data.Maybe (maybeToList, catMaybes)
 import Data.Ord (comparing)
 import qualified Data.Set as S
 import Network.HTTP.Conduit
@@ -22,6 +20,7 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as BL
 import System.Environment (getArgs)
 
+debug :: Bool
 debug = True
 
 -- Need this instance to be able to hold URI values in a Set
@@ -38,7 +37,7 @@ uriFromRefreshString :: String -> Maybe URI
 uriFromRefreshString s = case dropWhile (/= '=') s of
     ('=':'\'':rest) -> parseAbsoluteURI $ init rest
     ('=':rest) -> parseAbsoluteURI rest
-    otherwise  -> Nothing
+    _  -> Nothing
 
 -- Like the Show instance for URI, but keeps the password in the string
 uriAsString :: URI -> String
@@ -65,11 +64,11 @@ getLinksFrom200Response url (Response _ _ headers markup) =
         linkFromMetaTag = Nothing -- XXX Implement me!
 
 getLinksFrom3xxResponse :: URI -> Response BL.ByteString -> [URI]
-getLinksFrom3xxResponse url (Response _ _ headers _) = maybeToList $ do
+getLinksFrom3xxResponse _ (Response _ _ headers _) = maybeToList $ do
     lookup hLocation headers >>= parseAbsoluteURI . B.unpack
 
 getLinksFromResponse :: URI -> Response BL.ByteString -> [URI]
-getLinksFromResponse url r@(Response status _ _ markup)
+getLinksFromResponse url r@(Response status _ _ _)
     | status == status200 = getLinksFrom200Response url r
     | status == status301 ||
       status == status302 ||
@@ -131,7 +130,7 @@ satisfiesAll preds x = and . map ($ x) $ preds
 forkWorkerThread :: IO () -> IO (MVar ())
 forkWorkerThread io = do
     handle <- newEmptyMVar
-    forkFinally io (\_ -> putMVar handle ())
+    _ <- forkFinally io (\_ -> putMVar handle ())
     return handle
 
 -- Newer Prelude has this, but current Haskell Platform (which I'm using)
@@ -153,7 +152,7 @@ crawl uri uriTests numThreads =
         threads <- sequence . map forkWorkerThread . replicate numThreads $ thread
 
         -- Wait on all clients to finish
-        sequence $ map takeMVar threads
+        _ <- sequence $ map takeMVar threads
 
         seenURIs <- takeMVar seenURIsMV
         unseenURIs <- (readChan uriQueue) `untilM` (isEmptyChan uriQueue)
