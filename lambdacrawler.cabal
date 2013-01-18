@@ -28,5 +28,6 @@ executable lambdacrawler
                        containers,
                        conduit,
                        case-insensitive,
-                       monad-loops
+                       monad-loops,
+                       stm
   ghc-options: -Wall

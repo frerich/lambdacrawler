@@ -1,5 +1,6 @@
 -- TODO: Clean up imports
 import Control.Concurrent
+import Control.Concurrent.STM
 import Control.Exception (bracket, mask, try, SomeException)
 import Control.Monad (when)
 import Control.Monad.Loops (untilM)
@@ -7,7 +8,7 @@ import qualified Data.CaseInsensitive as CI
 import Data.Conduit (runResourceT)
 import Data.List (nub)
 import Data.Function (on)
-import Data.Maybe (maybeToList, catMaybes, fromJust)
+import Data.Maybe (maybeToList, catMaybes)
 import Data.Ord (comparing)
 import qualified Data.Set as S
 import Network.HTTP.Conduit
@@ -103,12 +104,18 @@ getLinksForURL mgr url = do
         normalizedURI :: URI -> URI
         normalizedURI uri = uri { uriFragment = "" }
 
-workerThread :: Chan (Maybe URI) -> MVar (S.Set URI) -> [(URI -> Bool)] -> Manager -> IO ()
-workerThread uriQueue seenURIsMV uriTests mgr = do
+workerThread :: TChan (Maybe URI) -> MVar (S.Set URI) -> MVar Int -> [(URI -> Bool)] -> Manager -> IO ()
+workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr = do
     -- Fetch next URI to crawl from the queue
-    item <- readChan uriQueue
+    item <- atomically $ readTChan uriQueue
+
     case item of
         Just uri -> do
+            -- Bump the number of active workers so that the other workers won't
+            -- terminate just because the URI queue might be empty; they will wait
+            -- for this one to produce any links.
+            modifyMVar_ activeWorkersMV $ return . (+1)
+
             -- Mark the URI as seen by adding it to the 'seenURIs' set
             modifyMVar_ seenURIsMV (return . S.insert uri)
 
@@ -128,15 +135,25 @@ workerThread uriQueue seenURIsMV uriTests mgr = do
             when debug (putStrLn $ show threadId ++ ": Crawled " ++ show uri ++ ": " ++ show (length links) ++ " links, " ++ show (length acceptableLinks) ++ " acceptable, " ++ show (length unseenLinks) ++ " unseen")
 
             -- Append all unseen links to our queue
-            writeList2Chan uriQueue . map Just $ unseenLinks
+            sequence_ . map atomically . map (writeTChan uriQueue) . map Just $ unseenLinks
 
-            queueEmpty <- isEmptyChan uriQueue
-            when queueEmpty $ writeChan uriQueue Nothing
-            workerThread uriQueue seenURIsMV uriTests mgr
+            -- Decrease the number of active workers to indicate that this
+            -- one won't be producing any new elements for the queue...
+            activeWorkerCount <- takeMVar activeWorkersMV
+            let newActiveWorkerCount = activeWorkerCount - 1
+            putMVar activeWorkersMV newActiveWorkerCount
+
+            -- ...and then inspect the queue: if it's empty, and we were
+            -- the last active worker, post a "poison pill" to the queue
+            -- of URIs: Nothing. It will wake up other worker threads which,
+            -- when processing Nothing, will terminate.
+            queueEmpty <- atomically $ isEmptyTChan uriQueue
+            when (queueEmpty && newActiveWorkerCount == 0) $ do
+                atomically $ writeTChan uriQueue Nothing
+            workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr
 
         Nothing -> do
-            writeChan uriQueue Nothing
-            return ()
+            atomically $ writeTChan uriQueue Nothing
 
 hostName :: URI -> Maybe String
 hostName uri = uriRegName `fmap` (uriAuthority uri)
@@ -153,21 +170,22 @@ forkWorkerThread io = do
 crawl :: URI -> [(URI -> Bool)] -> Int -> IO [URI]
 crawl uri uriTests numThreads =
     withSocketsDo $ bracket (newManager def) closeManager $ \mgr -> do
-        uriQueue <- newChan
+        uriQueue <- atomically $ newTChan
         seenURIsMV <- newMVar S.empty
+        activeWorkersMV <- newMVar 0
 
-        writeChan uriQueue $ Just uri
+        atomically $ writeTChan uriQueue $ Just uri
 
-        let thread = workerThread uriQueue seenURIsMV uriTests mgr
+        let thread = workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr
         threads <- sequence . map forkWorkerThread . replicate numThreads $ thread
 
         -- Wait on all clients to finish
         _ <- sequence $ map takeMVar threads
 
         seenURIs <- takeMVar seenURIsMV
-        unseenURIs <- (readChan uriQueue) `untilM` (isEmptyChan uriQueue)
+        unseenURIs <- (atomically $ readTChan uriQueue) `untilM` (atomically $ isEmptyTChan uriQueue)
 
-        return $ S.toList seenURIs ++ map fromJust unseenURIs
+        return $ S.toList seenURIs ++ catMaybes unseenURIs
 
 main :: IO ()
 main = do
