@@ -193,8 +193,7 @@ main = do
       then putStrLn "syntax: crawler.hs <url>"
       else case parseURI (head args) of
             Just uri -> do
-                -- TODO: Support for https
-                let httpTest = (== "http:") . uriScheme
+                let httpTest = (`elem` ["http:", "https:"]) . uriScheme
 
                 -- TODO: Support additional constraints (using wildcards?)
                 -- on the command line to avoid descending into certain
