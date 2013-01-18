@@ -1,7 +1,7 @@
 -- TODO: Clean up imports
 import Control.Concurrent
 import Control.Concurrent.STM
-import Control.Exception (bracket, mask, try, SomeException)
+import Control.Exception (bracket, bracket_, mask, try, SomeException)
 import Control.Monad (when)
 import Control.Monad.Loops (untilM)
 import qualified Data.CaseInsensitive as CI
@@ -113,11 +113,23 @@ workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr = do
 
     case item of
         Just uri -> do
-            -- Bump the number of active workers so that the other workers won't
-            -- terminate just because the URI queue might be empty; they will wait
-            -- for this one to produce any links.
-            modifyMV activeWorkersMV (+1)
+            bracket_ (modifyMV activeWorkersMV (+1)) (modifyMV activeWorkersMV (subtract 1)) $
+                processURI uri
 
+            -- ...and then inspect the queue: if it's empty, and we were
+            -- the last active worker, post a "poison pill" to the queue
+            -- of URIs: Nothing. It will wake up other worker threads which,
+            -- when processing Nothing, will terminate.
+            queueEmpty <- atomically $ isEmptyTChan uriQueue
+            activeWorkerCount <- readMVar activeWorkersMV
+            when (queueEmpty && activeWorkerCount == 0) $
+                atomically $ writeTChan uriQueue Nothing
+
+            workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr
+
+        Nothing -> atomically $ writeTChan uriQueue Nothing
+    where
+        processURI uri = do
             -- Mark the URI as seen by adding it to the 'seenURIs' set
             modifyMV seenURIsMV $ S.insert uri
 
@@ -138,23 +150,6 @@ workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr = do
 
             -- Append all unseen links to our queue
             mapM_ (atomically . writeTChan uriQueue . Just) unseenLinks
-
-            -- Decrease the number of active workers to indicate that this
-            -- one won't be producing any new elements for the queue...
-            activeWorkerCount <- takeMVar activeWorkersMV
-            let newActiveWorkerCount = activeWorkerCount - 1
-            putMVar activeWorkersMV newActiveWorkerCount
-
-            -- ...and then inspect the queue: if it's empty, and we were
-            -- the last active worker, post a "poison pill" to the queue
-            -- of URIs: Nothing. It will wake up other worker threads which,
-            -- when processing Nothing, will terminate.
-            queueEmpty <- atomically $ isEmptyTChan uriQueue
-            when (queueEmpty && newActiveWorkerCount == 0) $
-                atomically $ writeTChan uriQueue Nothing
-            workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr
-
-        Nothing -> atomically $ writeTChan uriQueue Nothing
 
 hostName :: URI -> Maybe String
 hostName uri = uriRegName `fmap` uriAuthority uri
