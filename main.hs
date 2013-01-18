@@ -180,7 +180,7 @@ crawl uri uriTests numThreads =
         threads <- sequence . map forkWorkerThread . replicate numThreads $ thread
 
         -- Wait on all clients to finish
-        _ <- sequence $ map takeMVar threads
+        sequence_ $ map takeMVar threads
 
         seenURIs <- takeMVar seenURIsMV
         unseenURIs <- (atomically $ readTChan uriQueue) `untilM` (atomically $ isEmptyTChan uriQueue)
