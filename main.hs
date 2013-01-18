@@ -21,9 +21,6 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as BL
 import System.Environment (getArgs)
 
-debug :: Bool
-debug = True
-
 -- Need this instance to be able to hold URI values in a Set; could
 -- get rid of this orphan instance by just requiring network-2.4 or newer.
 -- Unfortunately, the latest Haskell platform (2012.4.0.0) comes with
@@ -108,48 +105,42 @@ modifyMV mv f = modifyMVar_ mv $ return . f
 
 workerThread :: TChan (Maybe URI) -> MVar (S.Set URI) -> MVar Int -> [URI -> Bool] -> Manager -> IO ()
 workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr = do
-    -- Fetch next URI to crawl from the queue
     item <- atomically $ readTChan uriQueue
 
     case item of
         Just uri -> do
+            -- Keep track of the active workers to be able to tell when to
+            -- write the 'poison pill' which makes all threads stop to the
+            -- URI queue.
             bracket_ (modifyMV activeWorkersMV (+1)) (modifyMV activeWorkersMV (subtract 1)) $
                 processURI uri
 
-            -- ...and then inspect the queue: if it's empty, and we were
-            -- the last active worker, post a "poison pill" to the queue
-            -- of URIs: Nothing. It will wake up other worker threads which,
-            -- when processing Nothing, will terminate.
-            queueEmpty <- atomically $ isEmptyTChan uriQueue
-            activeWorkerCount <- readMVar activeWorkersMV
-            when (queueEmpty && activeWorkerCount == 0) $
-                atomically $ writeTChan uriQueue Nothing
+            -- The 'Nothing' is the poison pill: if it's read, a worker thread stops.
+            done <- endOfInput
+            when done $ atomically . writeTChan uriQueue $ Nothing
 
             workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr
-
         Nothing -> atomically $ writeTChan uriQueue Nothing
+
     where
         processURI uri = do
-            -- Mark the URI as seen by adding it to the 'seenURIs' set
             modifyMV seenURIsMV $ S.insert uri
-
-            -- Fetch HTML page and extract all links
             links <- getLinksForURL mgr uri
-
-            -- Weed out those links which we don't care about (links to pages
-            -- on other domains, non-http links, etc.)
             let acceptableLinks = filter (satisfiesAll uriTests) links
 
-            -- Weed out those links which we already visited
             seenURIs <- takeMVar seenURIsMV
             let unseenLinks = filter (`S.notMember` seenURIs) acceptableLinks
             putMVar seenURIsMV $ seenURIs `S.union` S.fromList unseenLinks
 
-            threadId <- myThreadId
-            when debug (putStrLn $ show threadId ++ ": Crawled " ++ show uri ++ ": " ++ show (length links) ++ " links, " ++ show (length acceptableLinks) ++ " acceptable, " ++ show (length unseenLinks) ++ " unseen")
-
-            -- Append all unseen links to our queue
             mapM_ (atomically . writeTChan uriQueue . Just) unseenLinks
+
+        -- There's no more input to be expected if no worker is active (every
+        -- worker is also a producer of new URIs), and if there is nothing
+        -- left in the URI queue.
+        endOfInput = do
+            queueEmpty <- atomically $ isEmptyTChan uriQueue
+            activeWorkerCount <- readMVar activeWorkersMV
+            return $ queueEmpty && activeWorkerCount == 0;
 
 hostName :: URI -> Maybe String
 hostName uri = uriRegName `fmap` uriAuthority uri
