@@ -23,9 +23,21 @@ import System.Environment (getArgs)
 debug :: Bool
 debug = True
 
--- Need this instance to be able to hold URI values in a Set
+-- Need this instance to be able to hold URI values in a Set; could
+-- get rid of this orphan instance by just requiring network-2.4 or newer.
+-- Unfortunately, the latest Haskell platform (2012.4.0.0) comes with
+-- network-2.3.1.0, so let's define this instance ourselves (and accept
+-- the warning) in order to not require anything newer than what's
+-- contained in the latestp latform.
 instance Ord URI where
     compare = comparing show
+
+-- Newer base package (4.6.0.0 or newer) has this, but currentl Haskell platform
+-- (2012.4.0.0) ships with base-4.5.1.0; so let's define it ourselves.
+forkFinally :: IO a -> (Either SomeException a -> IO ()) -> IO ThreadId
+forkFinally action and_then =
+   mask $ \restore ->
+     forkIO $ try (restore action) >>= and_then
 
 -- A header name I missed in Network.HTTP.Types.Header :-/
 hRefresh :: HeaderName
@@ -132,13 +144,6 @@ forkWorkerThread io = do
     handle <- newEmptyMVar
     _ <- forkFinally io (\_ -> putMVar handle ())
     return handle
-
--- Newer Prelude has this, but current Haskell Platform (which I'm using)
--- doesn't. So let's define it ourselves.
-forkFinally :: IO a -> (Either SomeException a -> IO ()) -> IO ThreadId
-forkFinally action and_then =
-   mask $ \restore ->
-     forkIO $ try (restore action) >>= and_then
 
 crawl :: URI -> [(URI -> Bool)] -> Int -> IO [URI]
 crawl uri uriTests numThreads =
