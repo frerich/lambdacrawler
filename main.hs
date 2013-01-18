@@ -102,6 +102,10 @@ getLinksForURL mgr url = do
         normalizedURI :: URI -> URI
         normalizedURI uri = uri { uriFragment = "" }
 
+-- Applies a pure function to a value in an MVar
+modifyMV :: MVar a -> (a -> a) -> IO ()
+modifyMV mv f = modifyMVar_ mv $ return . f
+
 workerThread :: TChan (Maybe URI) -> MVar (S.Set URI) -> MVar Int -> [URI -> Bool] -> Manager -> IO ()
 workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr = do
     -- Fetch next URI to crawl from the queue
@@ -112,10 +116,10 @@ workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr = do
             -- Bump the number of active workers so that the other workers won't
             -- terminate just because the URI queue might be empty; they will wait
             -- for this one to produce any links.
-            modifyMVar_ activeWorkersMV $ return . (+1)
+            modifyMV activeWorkersMV (+1)
 
             -- Mark the URI as seen by adding it to the 'seenURIs' set
-            modifyMVar_ seenURIsMV (return . S.insert uri)
+            modifyMV seenURIsMV $ S.insert uri
 
             -- Fetch HTML page and extract all links
             links <- getLinksForURL mgr uri
