@@ -7,7 +7,7 @@ import qualified Data.CaseInsensitive as CI
 import Data.Conduit (runResourceT)
 import Data.List (nub)
 import Data.Function (on)
-import Data.Maybe (maybeToList, catMaybes)
+import Data.Maybe (maybeToList, catMaybes, fromJust)
 import Data.Ord (comparing)
 import qualified Data.Set as S
 import Network.HTTP.Conduit
@@ -103,35 +103,40 @@ getLinksForURL mgr url = do
         normalizedURI :: URI -> URI
         normalizedURI uri = uri { uriFragment = "" }
 
-workerThread :: Chan URI -> MVar (S.Set URI) -> [(URI -> Bool)] -> Manager -> IO ()
+workerThread :: Chan (Maybe URI) -> MVar (S.Set URI) -> [(URI -> Bool)] -> Manager -> IO ()
 workerThread uriQueue seenURIsMV uriTests mgr = do
     -- Fetch next URI to crawl from the queue
-    uri <- readChan uriQueue
+    item <- readChan uriQueue
+    case item of
+        Just uri -> do
+            -- Mark the URI as seen by adding it to the 'seenURIs' set
+            modifyMVar_ seenURIsMV (return . S.insert uri)
 
-    -- Mark the URI as seen by adding it to the 'seenURIs' set
-    modifyMVar_ seenURIsMV (return . S.insert uri)
+            -- Fetch HTML page and extract all links
+            links <- getLinksForURL mgr uri
 
-    -- Fetch HTML page and extract all links
-    links <- getLinksForURL mgr uri
+            -- Weed out those links which we don't care about (links to pages
+            -- on other domains, non-http links, etc.)
+            let acceptableLinks = filter (satisfiesAll uriTests) links
 
-    -- Weed out those links which we don't care about (links to pages
-    -- on other domains, non-http links, etc.)
-    let acceptableLinks = filter (satisfiesAll uriTests) links
+            -- Weed out those links which we already visited
+            seenURIs <- takeMVar seenURIsMV
+            let unseenLinks = filter (\u -> u `S.notMember` seenURIs) acceptableLinks
+            putMVar seenURIsMV $ seenURIs `S.union` (S.fromList unseenLinks)
 
-    -- Weed out those links which we already visited
-    seenURIs <- takeMVar seenURIsMV
-    let unseenLinks = filter (\u -> u `S.notMember` seenURIs) acceptableLinks
-    putMVar seenURIsMV $ seenURIs `S.union` (S.fromList unseenLinks)
+            threadId <- myThreadId
+            when debug (putStrLn $ show threadId ++ ": Crawled " ++ show uri ++ ": " ++ show (length links) ++ " links, " ++ show (length acceptableLinks) ++ " acceptable, " ++ show (length unseenLinks) ++ " unseen")
 
-    threadId <- myThreadId
-    when debug (putStrLn $ show threadId ++ ": Crawled " ++ show uri ++ ": " ++ show (length links) ++ " links, " ++ show (length acceptableLinks) ++ " acceptable, " ++ show (length unseenLinks) ++ " unseen")
+            -- Append all unseen links to our queue
+            writeList2Chan uriQueue . map Just $ unseenLinks
 
-    -- Append all unseen links to our queue
-    writeList2Chan uriQueue unseenLinks
+            queueEmpty <- isEmptyChan uriQueue
+            when queueEmpty $ writeChan uriQueue Nothing
+            workerThread uriQueue seenURIsMV uriTests mgr
 
-    queueEmpty <- isEmptyChan uriQueue
-    if queueEmpty then return ()
-                  else workerThread uriQueue seenURIsMV uriTests mgr
+        Nothing -> do
+            writeChan uriQueue Nothing
+            return ()
 
 hostName :: URI -> Maybe String
 hostName uri = uriRegName `fmap` (uriAuthority uri)
@@ -151,7 +156,7 @@ crawl uri uriTests numThreads =
         uriQueue <- newChan
         seenURIsMV <- newMVar S.empty
 
-        writeChan uriQueue uri
+        writeChan uriQueue $ Just uri
 
         let thread = workerThread uriQueue seenURIsMV uriTests mgr
         threads <- sequence . map forkWorkerThread . replicate numThreads $ thread
@@ -162,7 +167,7 @@ crawl uri uriTests numThreads =
         seenURIs <- takeMVar seenURIsMV
         unseenURIs <- (readChan uriQueue) `untilM` (isEmptyChan uriQueue)
 
-        return $ S.toList seenURIs ++ unseenURIs
+        return $ S.toList seenURIs ++ map fromJust unseenURIs
 
 main :: IO ()
 main = do
