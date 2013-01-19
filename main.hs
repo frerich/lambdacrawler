@@ -188,21 +188,13 @@ crawl uri uriTests numThreads =
 main :: IO ()
 main = do
     args <- getArgs
-    -- TODO: Support more features like 'Show dead links' or 'Only show
-    -- links to files with a certain MIME type'.
     if null args
       then putStrLn "syntax: crawler.hs <url>"
       else case parseURI (head args) of
             Just uri -> do
                 let httpTest = (`elem` ["http:", "https:"]) . uriScheme
-
-                -- TODO: Support additional constraints (using wildcards?)
-                -- on the command line to avoid descending into certain
-                -- directories or the like.
                 let hostTest = ((==) `on` hostName) uri
-
                 links <- crawl uri [httpTest, hostTest] 10
-
                 putStrLn $ "Got " ++ show (length links) ++ " links:"
                 putStr $ unlines $ map uriAsString links
             Nothing -> putStrLn "Not a valid URI!"
