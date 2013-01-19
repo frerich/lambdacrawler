@@ -102,7 +102,6 @@ getLinksForURL mgr url = do
     return $ map normalizedURI $ getLinksFromResponse url response
     where
         -- For our purpose, URIs which just differ in the fragment part are equal
-        normalizedURI :: URI -> URI
         normalizedURI uri = uri { uriFragment = "" }
 
 -- Applies a pure function to a value in an MVar
