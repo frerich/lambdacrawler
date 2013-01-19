@@ -87,6 +87,12 @@ getLinksFromResponse url r@(Response status _ _ _)
 getURL :: Manager -> URI -> IO (Response BL.ByteString)
 getURL mgr url = do
     request <- parseUrl (uriAsString url)
+
+    -- Adjust the request so that the httpLbs function doesn't perform
+    -- any implicit redirects - we want to detect all redirections ourselves.
+    -- Furthermore, define checkStatus so that it never yields any exceptions;
+    -- instead, we can (have to!) look at the HTTP status code ourselves to
+    -- decide what happened.
     let request' = request { redirectCount = 0, checkStatus = \_ _ -> Nothing }
     runResourceT $ httpLbs request' mgr
 
