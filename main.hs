@@ -107,6 +107,12 @@ workerThread :: TChan (Maybe URI) -> MVar (S.Set URI) -> MVar Int -> [URI -> Boo
 workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr = do
     item <- atomically $ readTChan uriQueue
 
+    -- XXX RACE CONDITION: It may be that the above readTChan emptied
+    -- the queue, but the activeWorkers count wasn't bumped yet. Hence,
+    -- if a thread switch occurs at this point, another thread may conclude
+    -- that we're done crawling (see endOfInput function) and post the poison
+    -- pill!
+
     case item of
         Just uri -> do
             -- Keep track of the active workers to be able to tell when to
