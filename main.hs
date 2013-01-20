@@ -112,7 +112,7 @@ workerThread uriQueue seenURIsVar activeWorkersVar uriTests mgr = do
             Just u -> do
                 modifyTVar activeWorkersVar (+1)
                 return $ Just u
-            Nothing -> do
+            Nothing ->
                 return Nothing
 
     case item of
