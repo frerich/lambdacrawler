@@ -105,12 +105,12 @@ getLinksForURL mgr url = do
         normalizedURI uri = uri { uriFragment = "" }
 
 workerThread :: TChan (Maybe URI) -> TVar (S.Set URI) -> TVar Int -> [URI -> Bool] -> Manager -> IO ()
-workerThread uriQueue seenURIsVar activeWorkersTV uriTests mgr = do
+workerThread uriQueue seenURIsVar activeWorkersVar uriTests mgr = do
     item <- atomically $ do
         e <- readTChan uriQueue
         case e of
             Just u -> do
-                modifyTVar activeWorkersTV (+1)
+                modifyTVar activeWorkersVar (+1)
                 return $ Just u
             Nothing -> do
                 return Nothing
@@ -118,13 +118,13 @@ workerThread uriQueue seenURIsVar activeWorkersTV uriTests mgr = do
     case item of
         Just uri -> do
             processURI uri
-            atomically $ modifyTVar activeWorkersTV (subtract 1)
+            atomically $ modifyTVar activeWorkersVar (subtract 1)
 
             -- The 'Nothing' is the poison pill: if it's read, a worker thread stops.
             done <- endOfInput
             when done $ atomically . writeTChan uriQueue $ Nothing
 
-            workerThread uriQueue seenURIsVar activeWorkersTV uriTests mgr
+            workerThread uriQueue seenURIsVar activeWorkersVar uriTests mgr
         Nothing -> atomically $ writeTChan uriQueue Nothing
 
     where
@@ -146,7 +146,7 @@ workerThread uriQueue seenURIsVar activeWorkersTV uriTests mgr = do
         -- left in the URI queue.
         endOfInput = do
             queueEmpty <- atomically $ isEmptyTChan uriQueue
-            activeWorkerCount <- readTVarIO activeWorkersTV
+            activeWorkerCount <- readTVarIO activeWorkersVar
             return $ queueEmpty && activeWorkerCount == 0;
 
 hostName :: URI -> Maybe String
@@ -166,11 +166,11 @@ crawl uri uriTests numThreads =
     withSocketsDo $ bracket (newManager def) closeManager $ \mgr -> do
         uriQueue <- atomically newTChan
         seenURIsVar <- atomically $ newTVar S.empty
-        activeWorkersTV <- atomically $ newTVar 0
+        activeWorkersVar <- atomically $ newTVar 0
 
         atomically $ writeTChan uriQueue $ Just uri
 
-        let thread = workerThread uriQueue seenURIsVar activeWorkersTV uriTests mgr
+        let thread = workerThread uriQueue seenURIsVar activeWorkersVar uriTests mgr
         threads <- mapM forkWorkerThread . replicate numThreads $ thread
 
         -- Wait on all clients to finish
