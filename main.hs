@@ -104,12 +104,8 @@ getLinksForURL mgr url = do
         -- For our purpose, URIs which just differ in the fragment part are equal
         normalizedURI uri = uri { uriFragment = "" }
 
--- Applies a pure function to a value in an MVar
-modifyMV :: MVar a -> (a -> a) -> IO ()
-modifyMV mv f = modifyMVar_ mv $ return . f
-
-workerThread :: TChan (Maybe URI) -> MVar (S.Set URI) -> MVar Int -> [URI -> Bool] -> Manager -> IO ()
-workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr = do
+workerThread :: TChan (Maybe URI) -> TVar (S.Set URI) -> TVar Int -> [URI -> Bool] -> Manager -> IO ()
+workerThread uriQueue seenURIsVar activeWorkersTV uriTests mgr = do
     item <- atomically $ readTChan uriQueue
 
     -- XXX RACE CONDITION: It may be that the above readTChan emptied
@@ -123,25 +119,27 @@ workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr = do
             -- Keep track of the active workers to be able to tell when to
             -- write the 'poison pill' which makes all threads stop to the
             -- URI queue.
-            bracket_ (modifyMV activeWorkersMV (+1)) (modifyMV activeWorkersMV (subtract 1)) $
+            bracket_ (atomically $ modifyTVar activeWorkersTV (+1)) (atomically $ modifyTVar activeWorkersTV (subtract 1)) $
                 processURI uri
 
             -- The 'Nothing' is the poison pill: if it's read, a worker thread stops.
             done <- endOfInput
             when done $ atomically . writeTChan uriQueue $ Nothing
 
-            workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr
+            workerThread uriQueue seenURIsVar activeWorkersTV uriTests mgr
         Nothing -> atomically $ writeTChan uriQueue Nothing
 
     where
         processURI uri = do
-            modifyMV seenURIsMV $ S.insert uri
+            atomically $ modifyTVar seenURIsVar $ S.insert uri
             links <- getLinksForURL mgr uri
             let acceptableLinks = filter (satisfiesAll uriTests) links
 
-            seenURIs <- takeMVar seenURIsMV
-            let unseenLinks = filter (`S.notMember` seenURIs) acceptableLinks
-            putMVar seenURIsMV $ seenURIs `S.union` S.fromList unseenLinks
+            unseenLinks <- atomically $ do
+                seenURIs <- readTVar seenURIsVar
+                let unseen = filter (`S.notMember` seenURIs) acceptableLinks
+                writeTVar seenURIsVar $ seenURIs `S.union` S.fromList unseen
+                return unseen
 
             mapM_ (atomically . writeTChan uriQueue . Just) unseenLinks
 
@@ -150,7 +148,7 @@ workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr = do
         -- left in the URI queue.
         endOfInput = do
             queueEmpty <- atomically $ isEmptyTChan uriQueue
-            activeWorkerCount <- readMVar activeWorkersMV
+            activeWorkerCount <- readTVarIO activeWorkersTV
             return $ queueEmpty && activeWorkerCount == 0;
 
 hostName :: URI -> Maybe String
@@ -169,18 +167,18 @@ crawl :: URI -> [URI -> Bool] -> Int -> IO [URI]
 crawl uri uriTests numThreads =
     withSocketsDo $ bracket (newManager def) closeManager $ \mgr -> do
         uriQueue <- atomically newTChan
-        seenURIsMV <- newMVar S.empty
-        activeWorkersMV <- newMVar 0
+        seenURIsVar <- atomically $ newTVar S.empty
+        activeWorkersTV <- atomically $ newTVar 0
 
         atomically $ writeTChan uriQueue $ Just uri
 
-        let thread = workerThread uriQueue seenURIsMV activeWorkersMV uriTests mgr
+        let thread = workerThread uriQueue seenURIsVar activeWorkersTV uriTests mgr
         threads <- mapM forkWorkerThread . replicate numThreads $ thread
 
         -- Wait on all clients to finish
         mapM_ takeMVar threads
 
-        seenURIs <- takeMVar seenURIsMV
+        seenURIs <- readTVarIO seenURIsVar
         unseenURIs <- atomically (readTChan uriQueue) `untilM` atomically (isEmptyTChan uriQueue)
 
         return $ S.toList seenURIs ++ catMaybes unseenURIs
