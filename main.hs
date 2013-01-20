@@ -1,7 +1,7 @@
 -- TODO: Clean up imports
 import Control.Concurrent
 import Control.Concurrent.STM
-import Control.Exception (bracket, bracket_, mask, try, SomeException)
+import Control.Exception (bracket, mask, try, SomeException)
 import Control.Monad (when)
 import Control.Monad.Loops (untilM)
 import qualified Data.CaseInsensitive as CI
@@ -106,21 +106,19 @@ getLinksForURL mgr url = do
 
 workerThread :: TChan (Maybe URI) -> TVar (S.Set URI) -> TVar Int -> [URI -> Bool] -> Manager -> IO ()
 workerThread uriQueue seenURIsVar activeWorkersTV uriTests mgr = do
-    item <- atomically $ readTChan uriQueue
-
-    -- XXX RACE CONDITION: It may be that the above readTChan emptied
-    -- the queue, but the activeWorkers count wasn't bumped yet. Hence,
-    -- if a thread switch occurs at this point, another thread may conclude
-    -- that we're done crawling (see endOfInput function) and post the poison
-    -- pill!
+    item <- atomically $ do
+        e <- readTChan uriQueue
+        case e of
+            Just u -> do
+                modifyTVar activeWorkersTV (+1)
+                return $ Just u
+            Nothing -> do
+                return Nothing
 
     case item of
         Just uri -> do
-            -- Keep track of the active workers to be able to tell when to
-            -- write the 'poison pill' which makes all threads stop to the
-            -- URI queue.
-            bracket_ (atomically $ modifyTVar activeWorkersTV (+1)) (atomically $ modifyTVar activeWorkersTV (subtract 1)) $
-                processURI uri
+            processURI uri
+            atomically $ modifyTVar activeWorkersTV (subtract 1)
 
             -- The 'Nothing' is the poison pill: if it's read, a worker thread stops.
             done <- endOfInput
