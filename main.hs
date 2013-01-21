@@ -190,7 +190,8 @@ main = do
             Just uri -> do
                 let httpTest = (`elem` ["http:", "https:"]) . uriScheme
                 let hostTest = ((==) `on` hostName) uri
-                links <- crawl uri [httpTest, hostTest] 10
+                let numParallelConnections = 10
+                links <- crawl uri [httpTest, hostTest] numParallelConnections
                 putStrLn $ "Got " ++ show (length links) ++ " links:"
                 putStr $ unlines $ map uriAsString links
             Nothing -> putStrLn "Not a valid URI!"
