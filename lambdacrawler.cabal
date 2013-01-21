@@ -15,6 +15,10 @@ category:            Network
 build-type:          Simple
 cabal-version:       >=1.8
 
+source-repository head
+    type:     git
+    location: git://github.com/frerich/lambdacrawler.git
+
 executable lambdacrawler
   main-is: main.hs
   -- other-modules:       
