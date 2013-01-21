@@ -84,8 +84,8 @@ getLinksFromResponse url r@(Response status _ _ _)
     | status == status404                             = []
     | otherwise                                       = error (show r)
 
-getURL :: Manager -> URI -> IO (Response BL.ByteString)
-getURL mgr url = do
+getLinksForURL :: Manager -> URI -> IO [URI]
+getLinksForURL mgr url = do
     request <- parseUrl (uriAsString url)
 
     -- Adjust the request so that the httpLbs function doesn't perform
@@ -94,11 +94,7 @@ getURL mgr url = do
     -- instead, we can (have to!) look at the HTTP status code ourselves to
     -- decide what happened.
     let request' = request { redirectCount = 0, checkStatus = \_ _ -> Nothing }
-    runResourceT $ httpLbs request' mgr
-
-getLinksForURL :: Manager -> URI -> IO [URI]
-getLinksForURL mgr url = do
-    response <- getURL mgr url
+    response <- runResourceT $ httpLbs request' mgr
     return $ map normalizedURI $ getLinksFromResponse url response
     where
         -- For our purpose, URIs which just differ in the fragment part are equal
