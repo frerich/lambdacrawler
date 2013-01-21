@@ -123,15 +123,15 @@ workerThread uriQueue seenURIsVar activeWorkersVar uriTests mgr = do
         processURI uri = do
             atomically $ modifyTVar seenURIsVar $ S.insert uri
             links <- getLinksForURL mgr uri
-            let acceptableLinks = filter (satisfiesAll uriTests) links
+            let acceptableLinks = S.fromList $ filter (satisfiesAll uriTests) links
 
             unseenLinks <- atomically $ do
                 seenURIs <- readTVar seenURIsVar
-                let unseen = filter (`S.notMember` seenURIs) acceptableLinks
-                writeTVar seenURIsVar $ seenURIs `S.union` S.fromList unseen
+                let unseen = acceptableLinks `S.difference` seenURIs
+                writeTVar seenURIsVar $ seenURIs `S.union` unseen
                 return unseen
 
-            mapM_ (atomically . writeTChan uriQueue . Just) unseenLinks
+            mapM_ (atomically . writeTChan uriQueue . Just) . S.toList $ unseenLinks
 
         -- There's no more input to be expected if no worker is active (every
         -- worker is also a producer of new URIs), and if there is nothing
