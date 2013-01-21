@@ -104,12 +104,8 @@ workerThread :: TChan (Maybe URI) -> TVar (S.Set URI) -> TVar Int -> [URI -> Boo
 workerThread uriQueue seenURIsVar activeWorkersVar uriTests mgr = do
     item <- atomically $ do
         e <- readTChan uriQueue
-        case e of
-            Just u -> do
-                modifyTVar activeWorkersVar (+1)
-                return $ Just u
-            Nothing ->
-                return Nothing
+        when (e /= Nothing) $ modifyTVar activeWorkersVar (+1)
+        return e;
 
     case item of
         Just uri -> do
