@@ -19,6 +19,9 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as BL
 import System.Environment (getArgs)
 
+data Command = Scan URI
+             | Stop
+
 -- Need this instance to be able to hold URI values in a Set; could
 -- get rid of this orphan instance by just requiring network-2.4 or newer.
 -- Unfortunately, the latest Haskell platform (2012.4.0.0) comes with
@@ -98,12 +101,12 @@ getLinksForURL mgr url = do
         -- For our purpose, URIs which just differ in the fragment part are equal
         normalizedURI uri = uri { uriFragment = "" }
 
-workerThread :: TChan (Maybe URI) -> TChan [URI] -> TVar (S.Set URI) -> [URI -> Bool] -> Manager -> IO ()
+workerThread :: TChan Command -> TChan [URI] -> TVar (S.Set URI) -> [URI -> Bool] -> Manager -> IO ()
 workerThread unseenQueue minedQueue seenURISetVar uriTests mgr = do
     item <- atomically $ readTChan unseenQueue
 
     case item of
-        Just uri -> do
+        Scan uri -> do
             atomically $ modifyTVar seenURISetVar $ S.insert uri
             links <- getLinksForURL mgr uri
             let acceptableLinks = S.fromList $ filter (satisfiesAll uriTests) links
@@ -118,9 +121,9 @@ workerThread unseenQueue minedQueue seenURISetVar uriTests mgr = do
 
             workerThread unseenQueue minedQueue seenURISetVar uriTests mgr
 
-        Nothing -> do
+        Stop -> do
             -- Put poison pill back for other workers to consume (yuck!)
-            atomically $ unGetTChan unseenQueue Nothing
+            atomically $ unGetTChan unseenQueue Stop
             return ()
 
 hostName :: URI -> Maybe String
@@ -147,8 +150,7 @@ crawl uri uriTests numThreads =
 
         links <- crawlURIs unseenQueue 0 minedQueue [uri]
 
-        -- Post poison pill, then wait for all threads to finish
-        atomically $ writeTChan unseenQueue Nothing
+        atomically $ writeTChan unseenQueue Stop
         mapM_ takeMVar threads
 
         return links
@@ -158,7 +160,7 @@ crawl uri uriTests numThreads =
             if newQueueLen == 0
                 then return uris
                 else do
-                    mapM_ (atomically . writeTChan unseenQueue . Just) uris
+                    mapM_ (atomically . writeTChan unseenQueue . Scan) uris
                     minedLinks <- atomically $ readTChan minedQueue
                     minedSubLinks <- crawlURIs unseenQueue (newQueueLen - 1) minedQueue minedLinks
                     return $ uris ++ minedSubLinks
