@@ -2,8 +2,6 @@
 import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Exception (bracket, mask, try, SomeException)
-import Control.Monad (when)
-import Control.Monad.Loops (untilM)
 import qualified Data.CaseInsensitive as CI
 import Data.Conduit (runResourceT)
 import Data.List (nub)
@@ -100,46 +98,30 @@ getLinksForURL mgr url = do
         -- For our purpose, URIs which just differ in the fragment part are equal
         normalizedURI uri = uri { uriFragment = "" }
 
-workerThread :: TChan (Maybe URI) -> TVar (S.Set URI) -> TVar Int -> [URI -> Bool] -> Manager -> IO ()
-workerThread uriQueue seenURIsVar activeWorkersVar uriTests mgr = do
-    item <- atomically $ do
-        e <- readTChan uriQueue
-        when (e /= Nothing) $ modifyTVar activeWorkersVar (+1)
-        return e;
+workerThread :: TChan (Maybe URI) -> TChan [URI] -> TVar (S.Set URI) -> [URI -> Bool] -> Manager -> IO ()
+workerThread unseenQueue minedQueue seenURISetVar uriTests mgr = do
+    item <- atomically $ readTChan unseenQueue
 
     case item of
         Just uri -> do
-            processURI uri
-            atomically $ modifyTVar activeWorkersVar (subtract 1)
-
-            -- The 'Nothing' is the poison pill: if it's read, a worker thread stops.
-            done <- endOfInput
-            when done $ atomically . writeTChan uriQueue $ Nothing
-
-            workerThread uriQueue seenURIsVar activeWorkersVar uriTests mgr
-        Nothing -> atomically $ writeTChan uriQueue Nothing
-
-    where
-        processURI uri = do
-            atomically $ modifyTVar seenURIsVar $ S.insert uri
+            atomically $ modifyTVar seenURISetVar $ S.insert uri
             links <- getLinksForURL mgr uri
             let acceptableLinks = S.fromList $ filter (satisfiesAll uriTests) links
 
             unseenLinks <- atomically $ do
-                seenURIs <- readTVar seenURIsVar
+                seenURIs <- readTVar seenURISetVar
                 let unseen = acceptableLinks `S.difference` seenURIs
-                writeTVar seenURIsVar $ seenURIs `S.union` unseen
+                writeTVar seenURISetVar $ seenURIs `S.union` unseen
                 return unseen
 
-            mapM_ (atomically . writeTChan uriQueue . Just) . S.toList $ unseenLinks
+            atomically $ writeTChan minedQueue $ S.toList unseenLinks
 
-        -- There's no more input to be expected if no worker is active (every
-        -- worker is also a producer of new URIs), and if there is nothing
-        -- left in the URI queue.
-        endOfInput = do
-            queueEmpty <- atomically $ isEmptyTChan uriQueue
-            activeWorkerCount <- readTVarIO activeWorkersVar
-            return $ queueEmpty && activeWorkerCount == 0;
+            workerThread unseenQueue minedQueue seenURISetVar uriTests mgr
+
+        Nothing -> do
+            -- Put poison pill back for other workers to consume (yuck!)
+            atomically $ unGetTChan unseenQueue Nothing
+            return ()
 
 hostName :: URI -> Maybe String
 hostName uri = uriRegName `fmap` uriAuthority uri
@@ -156,23 +138,30 @@ forkWorkerThread io = do
 crawl :: URI -> [URI -> Bool] -> Int -> IO [URI]
 crawl uri uriTests numThreads =
     withSocketsDo $ bracket (newManager def) closeManager $ \mgr -> do
-        uriQueue <- atomically newTChan
-        seenURIsVar <- atomically $ newTVar S.empty
-        activeWorkersVar <- atomically $ newTVar 0
+        unseenQueue <- atomically newTChan
+        minedQueue <- atomically newTChan
+        seenURISetVar <- atomically $ newTVar S.empty
 
-        atomically $ writeTChan uriQueue $ Just uri
-
-        let thread = workerThread uriQueue seenURIsVar activeWorkersVar uriTests mgr
+        let thread = workerThread unseenQueue minedQueue seenURISetVar uriTests mgr
         threads <- mapM forkWorkerThread . replicate numThreads $ thread
 
-        -- Wait on all clients to finish
+        links <- crawlURIs unseenQueue 0 minedQueue [uri]
+
+        -- Post poison pill, then wait for all threads to finish
+        atomically $ writeTChan unseenQueue Nothing
         mapM_ takeMVar threads
 
-        seenURIs <- readTVarIO seenURIsVar
-        unseenURIs <- atomically (readTChan uriQueue) `untilM` atomically (isEmptyTChan uriQueue)
-
-        return $ S.toList seenURIs ++ catMaybes unseenURIs
-
+        return links
+    where
+        crawlURIs unseenQueue unseenQueueLen minedQueue uris = do
+            let newQueueLen = unseenQueueLen + length uris
+            if newQueueLen == 0
+                then return uris
+                else do
+                    mapM_ (atomically . writeTChan unseenQueue . Just) uris
+                    minedLinks <- atomically $ readTChan minedQueue
+                    minedSubLinks <- crawlURIs unseenQueue (newQueueLen - 1) minedQueue minedLinks
+                    return $ uris ++ minedSubLinks
 main :: IO ()
 main = do
     args <- getArgs
