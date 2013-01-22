@@ -96,7 +96,7 @@ getLinksForURL mgr url = do
     -- instead, we can (have to!) look at the HTTP status code ourselves to
     -- decide what happened.
     let request' = request { redirectCount = 0, checkStatus = \_ _ -> Nothing }
-    response <- runResourceT $ httpLbs request' mgr
+    response <- runResourceT $ httpLbs request' mgr -- XXX response is not lazy!
     return $ map normalizedURI $ getLinksFromResponse url response
     where
         -- For our purpose, URIs which just differ in the fragment part are equal
