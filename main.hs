@@ -18,6 +18,7 @@ import Text.HTML.TagSoup
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as BL
 import System.Environment (getArgs)
+import Pipe
 
 data Command = Scan URI
              | Stop
@@ -101,8 +102,8 @@ getLinksForURL mgr url = do
         -- For our purpose, URIs which just differ in the fragment part are equal
         normalizedURI uri = uri { uriFragment = "" }
 
-workerThread :: TChan Command -> TChan [URI] -> TVar (S.Set URI) -> [URI -> Bool] -> Manager -> IO ()
-workerThread unseenQueue minedQueue seenURISetVar uriTests mgr = do
+workerThread :: TChan Command -> TSink [URI] -> TVar (S.Set URI) -> [URI -> Bool] -> Manager -> IO ()
+workerThread unseenQueue uriSink seenURISetVar uriTests mgr = do
     item <- atomically $ readTChan unseenQueue
 
     case item of
@@ -117,9 +118,9 @@ workerThread unseenQueue minedQueue seenURISetVar uriTests mgr = do
                 writeTVar seenURISetVar $ seenURIs `S.union` unseen
                 return unseen
 
-            atomically $ writeTChan minedQueue $ S.toList unseenLinks
+            atomically $ writeTSink uriSink $ S.toList unseenLinks
 
-            workerThread unseenQueue minedQueue seenURISetVar uriTests mgr
+            workerThread unseenQueue uriSink seenURISetVar uriTests mgr
 
         Stop -> do
             -- Put poison pill back for other workers to consume (yuck!)
@@ -142,27 +143,27 @@ crawl :: URI -> [URI -> Bool] -> Int -> IO [URI]
 crawl uri uriTests numThreads =
     withSocketsDo $ bracket (newManager def) closeManager $ \mgr -> do
         unseenQueue <- atomically newTChan
-        minedQueue <- atomically newTChan
+        (uriSink, uriSource) <- atomically newTPipe
         seenURISetVar <- atomically $ newTVar S.empty
 
-        let thread = workerThread unseenQueue minedQueue seenURISetVar uriTests mgr
+        let thread = workerThread unseenQueue uriSink seenURISetVar uriTests mgr
         threads <- mapM forkWorkerThread . replicate numThreads $ thread
 
-        links <- crawlURIs unseenQueue 0 minedQueue [uri]
+        links <- crawlURIs unseenQueue 0 uriSource [uri]
 
         atomically $ writeTChan unseenQueue Stop
         mapM_ takeMVar threads
 
         return links
     where
-        crawlURIs unseenQueue unseenQueueLen minedQueue uris = do
+        crawlURIs unseenQueue unseenQueueLen uriSource uris = do
             let newQueueLen = unseenQueueLen + length uris
             if newQueueLen == 0
                 then return uris
                 else do
                     mapM_ (atomically . writeTChan unseenQueue . Scan) uris
-                    minedLinks <- atomically $ readTChan minedQueue
-                    minedSubLinks <- crawlURIs unseenQueue (newQueueLen - 1) minedQueue minedLinks
+                    minedLinks <- atomically $ readTSource uriSource
+                    minedSubLinks <- crawlURIs unseenQueue (newQueueLen - 1) uriSource minedLinks
                     return $ uris ++ minedSubLinks
 main :: IO ()
 main = do
