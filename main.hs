@@ -147,7 +147,7 @@ crawl uri uriTests numThreads =
         seenURISetVar <- atomically $ newTVar S.empty
 
         let thread = workerThread unseenQueue uriSink seenURISetVar uriTests mgr
-        threads <- mapM forkWorkerThread . replicate numThreads $ thread
+        threads <- mapM forkWorkerThread . replicate (max numThreads 1) $ thread
 
         links <- crawlURIs unseenQueue 0 uriSource [uri]
 
