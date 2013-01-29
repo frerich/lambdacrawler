@@ -18,7 +18,7 @@ import Text.HTML.TagSoup
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as BL
 import Pipe
-import qualified Arguments as Arg
+import Arguments
 
 data Command = Scan URI
              | Stop
@@ -167,8 +167,8 @@ crawl uri uriTests numThreads =
                     return $ uris ++ minedSubLinks
 main :: IO ()
 main = do
-    args <- Arg.parseArgs
-    case parseURI (Arg.url args) of
+    args <- parseArgs
+    case parseURI (url args) of
         Just uri -> do
             let httpTest = (`elem` ["http:", "https:"]) . uriScheme
             let hostTest = ((==) `on` hostName) uri
