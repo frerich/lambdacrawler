@@ -34,7 +34,8 @@ executable lambdacrawler
                        conduit,
                        case-insensitive,
                        monad-loops,
-                       stm
+                       stm,
+                       cmdargs
 
   ghc-options:         -Wall
   if flag(threaded)

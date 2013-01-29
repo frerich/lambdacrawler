@@ -17,8 +17,8 @@ import Network.URI
 import Text.HTML.TagSoup
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as BL
-import System.Environment (getArgs)
 import Pipe
+import qualified Arguments as Arg
 
 data Command = Scan URI
              | Stop
@@ -167,17 +167,15 @@ crawl uri uriTests numThreads =
                     return $ uris ++ minedSubLinks
 main :: IO ()
 main = do
-    args <- getArgs
-    if null args
-      then putStrLn "syntax: crawler.hs <url>"
-      else case parseURI (head args) of
-            Just uri -> do
-                let httpTest = (`elem` ["http:", "https:"]) . uriScheme
-                let hostTest = ((==) `on` hostName) uri
-                let numParallelConnections = 10
-                links <- crawl uri [httpTest, hostTest] numParallelConnections
-                putStrLn $ "Got " ++ show (length links) ++ " links:"
-                putStr $ unlines $ map uriAsString links
-            Nothing -> putStrLn "Not a valid URI!"
+    args <- Arg.parseArgs
+    case parseURI (Arg.url args) of
+        Just uri -> do
+            let httpTest = (`elem` ["http:", "https:"]) . uriScheme
+            let hostTest = ((==) `on` hostName) uri
+            let numParallelConnections = 10
+            links <- crawl uri [httpTest, hostTest] numParallelConnections
+            putStrLn $ "Got " ++ show (length links) ++ " links:"
+            putStr $ unlines $ map uriAsString links
+        Nothing -> putStrLn "Not a valid URI!"
 
 
