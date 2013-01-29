@@ -21,8 +21,9 @@ flag threaded
     description: Build with support for multithreaded execution
 
 executable lambdacrawler
-  main-is: main.hs
-  -- other-modules:       
+  hs-source-dirs: src
+  main-is: Main.hs
+  other-modules: Arguments Pipe
 
   build-depends:       base,
                        bytestring,
