@@ -1,6 +1,6 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 module Arguments
-    ( Arguments(url)
+    ( Arguments(url, numParallelConnections)
     , parseArgs
     ) where
 
@@ -9,12 +9,14 @@ import System.Console.CmdArgs
 
 data Arguments = Arguments
     { url :: String
+    , numParallelConnections :: Int
     }
     deriving (Data, Typeable)
 
 argSpec :: Arguments
 argSpec = Arguments
     { url = def &= typ "URL" &= argPos 0
+    , numParallelConnections = 10 &= help "Maximum number of parallel HTTP connections"
     }
     &= program "lambdacrawler"
     &= summary "lambdacrawler 0.1.0.0"
