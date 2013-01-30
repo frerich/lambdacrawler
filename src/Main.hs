@@ -185,6 +185,7 @@ main = do
             let httpTest = (`elem` ["http:", "https:"]) . uriScheme
             let hostTest = ((==) `on` hostName) uri
             let logFn = if (verbose args) then simpleLog else nullLog
+            logFn $ "Starting to crawl at " ++ url args ++ " with up to " ++ show (numParallelConnections args) ++ " threads"
             links <- crawl uri [httpTest, hostTest] (numParallelConnections args) logFn
             putStrLn $ "Got " ++ show (length links) ++ " links:"
             putStr $ unlines $ map uriAsString links
