@@ -18,7 +18,7 @@ import Text.HTML.TagSoup
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as BL
 import Pipe
-import Arguments
+import qualified Arguments as Arg
 
 data Command = Scan URI
              | Stop
@@ -179,14 +179,14 @@ crawl uri uriTests numThreads logFn =
                     return $ uris ++ minedSubLinks
 main :: IO ()
 main = do
-    args <- parseArgs
-    case parseURI (url args) of
+    args <- Arg.parseArgs
+    case parseURI (Arg.url args) of
         Just uri -> do
             let httpTest = (`elem` ["http:", "https:"]) . uriScheme
             let hostTest = ((==) `on` hostName) uri
-            let logFn = if (verbose args) then simpleLog else nullLog
-            logFn $ "Starting to crawl at " ++ url args ++ " with up to " ++ show (numParallelConnections args) ++ " threads"
-            links <- crawl uri [httpTest, hostTest] (numParallelConnections args) logFn
+            let logFn = if (Arg.verbose args) then simpleLog else nullLog
+            logFn $ "Starting to crawl at " ++ Arg.url args ++ " with up to " ++ show (Arg.numParallelConnections args) ++ " threads"
+            links <- crawl uri [httpTest, hostTest] (Arg.numParallelConnections args) logFn
             putStrLn $ "Got " ++ show (length links) ++ " links:"
             putStr $ unlines $ map uriAsString links
         Nothing -> putStrLn "Not a valid URI!"
