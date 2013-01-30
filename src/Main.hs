@@ -23,6 +23,14 @@ import Arguments
 data Command = Scan URI
              | Stop
 
+type LogFn = String -> IO ()
+
+nullLog :: LogFn
+nullLog _ = return ()
+
+simpleLog :: LogFn
+simpleLog = putStrLn
+
 -- Need this instance to be able to hold URI values in a Set; could
 -- get rid of this orphan instance by just requiring network-2.4 or newer.
 -- Unfortunately, the latest Haskell platform (2012.4.0.0) comes with
@@ -102,8 +110,8 @@ getLinksForURL mgr url = do
         -- For our purpose, URIs which just differ in the fragment part are equal
         normalizedURI uri = uri { uriFragment = "" }
 
-workerThread :: TChan Command -> TSink [URI] -> TVar (S.Set URI) -> [URI -> Bool] -> Manager -> IO ()
-workerThread unseenQueue uriSink seenURISetVar uriTests mgr = do
+workerThread :: TChan Command -> TSink [URI] -> TVar (S.Set URI) -> [URI -> Bool] -> Manager -> LogFn -> IO ()
+workerThread unseenQueue uriSink seenURISetVar uriTests mgr logFn = do
     item <- atomically $ readTChan unseenQueue
 
     case item of
@@ -118,9 +126,13 @@ workerThread unseenQueue uriSink seenURISetVar uriTests mgr = do
                 writeTVar seenURISetVar $ seenURIs `S.union` unseen
                 return unseen
 
+            logFn $ "Crawled " ++ uriAsString uri ++ ", "
+                               ++ show (S.size acceptableLinks) ++ " links found, "
+                               ++ show (S.size unseenLinks) ++ " unseen"
+
             atomically $ writeTSink uriSink $ S.toList unseenLinks
 
-            workerThread unseenQueue uriSink seenURISetVar uriTests mgr
+            workerThread unseenQueue uriSink seenURISetVar uriTests mgr logFn
 
         Stop -> do
             -- Put poison pill back for other workers to consume (yuck!)
@@ -139,14 +151,14 @@ forkWorkerThread io = do
     _ <- forkFinally io (\_ -> putMVar handle ())
     return handle
 
-crawl :: URI -> [URI -> Bool] -> Int -> IO [URI]
-crawl uri uriTests numThreads =
+crawl :: URI -> [URI -> Bool] -> Int -> LogFn -> IO [URI]
+crawl uri uriTests numThreads logFn =
     withSocketsDo $ bracket (newManager def) closeManager $ \mgr -> do
         unseenQueue <- atomically newTChan
         (uriSink, uriSource) <- atomically newTPipe
         seenURISetVar <- atomically $ newTVar S.empty
 
-        let thread = workerThread unseenQueue uriSink seenURISetVar uriTests mgr
+        let thread = workerThread unseenQueue uriSink seenURISetVar uriTests mgr logFn
         threads <- mapM forkWorkerThread . replicate (max numThreads 1) $ thread
 
         links <- crawlURIs unseenQueue 0 uriSource [uri]
@@ -172,7 +184,8 @@ main = do
         Just uri -> do
             let httpTest = (`elem` ["http:", "https:"]) . uriScheme
             let hostTest = ((==) `on` hostName) uri
-            links <- crawl uri [httpTest, hostTest] (numParallelConnections args)
+            let logFn = if (verbose args) then simpleLog else nullLog
+            links <- crawl uri [httpTest, hostTest] (numParallelConnections args) logFn
             putStrLn $ "Got " ++ show (length links) ++ " links:"
             putStr $ unlines $ map uriAsString links
         Nothing -> putStrLn "Not a valid URI!"
