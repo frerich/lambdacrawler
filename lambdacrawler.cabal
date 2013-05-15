@@ -30,7 +30,7 @@ executable lambdacrawler
                        tagsoup,
                        network,
                        http-types,
-                       http-conduit,
+                       http-conduit < 1.9.0,
                        containers,
                        conduit,
                        case-insensitive,
