@@ -1,13 +1,12 @@
 -- TODO: Clean up imports
 import Control.Concurrent
 import Control.Concurrent.STM
-import Control.Exception (bracket, mask, try, SomeException)
+import Control.Exception (bracket)
 import qualified Data.CaseInsensitive as CI
 import Data.Conduit (runResourceT)
 import Data.List (nub)
 import Data.Function (on)
 import Data.Maybe (maybeToList, catMaybes)
-import Data.Ord (comparing)
 import qualified Data.Set as S
 import Network.HTTP.Conduit
 import Network.HTTP.Types.Header
