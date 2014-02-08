@@ -60,7 +60,7 @@ getLinksFrom200Response url (Response _ _ headers markup) =
                                   $ BL.unpack markup
                 hrefToAbsoluteURI base href = do
                     parsedRef <- parseURIReference href
-                    parsedRef `nonStrictRelativeTo` base
+                    return $ parsedRef `nonStrictRelativeTo` base
 
         linkFromRefreshHeader = lookup hRefresh headers >>= uriFromRefreshString . B.unpack
 
