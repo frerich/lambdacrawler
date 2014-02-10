@@ -93,9 +93,9 @@ getLinksForURL mgr url = do
         -- For our purpose, URIs which just differ in the fragment part are equal
         normalizedURI uri = uri { uriFragment = "" }
 
-workerThread :: TChan Command -> TSink [URI] -> TVar (S.Set URI) -> [URI -> Bool] -> Manager -> LogFn -> IO ()
+workerThread :: TQueue Command -> TSink [URI] -> TVar (S.Set URI) -> [URI -> Bool] -> Manager -> LogFn -> IO ()
 workerThread unseenQueue uriSink seenURISetVar uriTests mgr logFn = do
-    item <- atomically $ readTChan unseenQueue
+    item <- atomically $ readTQueue unseenQueue
 
     case item of
         Scan uri -> do
@@ -119,7 +119,7 @@ workerThread unseenQueue uriSink seenURISetVar uriTests mgr logFn = do
 
         Stop -> do
             -- Put poison pill back for other workers to consume (yuck!)
-            atomically $ unGetTChan unseenQueue Stop
+            atomically $ unGetTQueue unseenQueue Stop
             return ()
 
 hostName :: URI -> Maybe String
@@ -137,7 +137,7 @@ forkWorkerThread io = do
 crawl :: URI -> [URI -> Bool] -> Int -> LogFn -> IO [URI]
 crawl uri uriTests numThreads logFn =
     withSocketsDo $ bracket (newManager def) closeManager $ \mgr -> do
-        unseenQueue <- atomically newTChan
+        unseenQueue <- atomically newTQueue
         (uriSink, uriSource) <- atomically newTPipe
         seenURISetVar <- atomically $ newTVar S.empty
 
@@ -146,7 +146,7 @@ crawl uri uriTests numThreads logFn =
 
         links <- crawlURIs unseenQueue 0 uriSource [uri]
 
-        atomically $ writeTChan unseenQueue Stop
+        atomically $ writeTQueue unseenQueue Stop
         mapM_ takeMVar threads
 
         return links
@@ -156,7 +156,7 @@ crawl uri uriTests numThreads logFn =
             if newQueueLen == 0
                 then return uris
                 else do
-                    mapM_ (atomically . writeTChan unseenQueue . Scan) uris
+                    mapM_ (atomically . writeTQueue unseenQueue . Scan) uris
                     minedLinks <- atomically $ readTSource uriSource
                     minedSubLinks <- crawlURIs unseenQueue (newQueueLen - 1) uriSource minedLinks
                     return $ uris ++ minedSubLinks
