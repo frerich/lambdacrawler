@@ -1,7 +1,7 @@
 -- TODO: Clean up imports
-import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Exception (bracket)
+import Control.Concurrent.ThreadPool as ThreadPool
 import qualified Data.CaseInsensitive as CI
 import Data.Conduit (runResourceT)
 import Data.List (nub)
@@ -16,11 +16,7 @@ import Network.URI
 import Text.HTML.TagSoup
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as BL
-import Pipe
 import qualified Arguments as Arg
-
-data Command = Scan URI
-             | Stop
 
 type LogFn = String -> IO ()
 
@@ -93,73 +89,44 @@ getLinksForURL mgr url = do
         -- For our purpose, URIs which just differ in the fragment part are equal
         normalizedURI uri = uri { uriFragment = "" }
 
-workerThread :: TQueue Command -> TSink [URI] -> TVar (S.Set URI) -> [URI -> Bool] -> Manager -> LogFn -> IO ()
-workerThread unseenQueue uriSink seenURISetVar uriTests mgr logFn = do
-    item <- atomically $ readTQueue unseenQueue
-
-    case item of
-        Scan uri -> do
-            atomically $ modifyTVar seenURISetVar $ S.insert uri
-            links <- getLinksForURL mgr uri
-            let acceptableLinks = S.fromList $ filter (satisfiesAll uriTests) links
-
-            unseenLinks <- atomically $ do
-                seenURIs <- readTVar seenURISetVar
-                let unseen = acceptableLinks `S.difference` seenURIs
-                writeTVar seenURISetVar $ seenURIs `S.union` unseen
-                return unseen
-
-            logFn $ "Crawled " ++ uriAsString uri ++ ", "
-                               ++ show (S.size acceptableLinks) ++ " links found, "
-                               ++ show (S.size unseenLinks) ++ " unseen"
-
-            atomically $ writeTSink uriSink $ S.toList unseenLinks
-
-            workerThread unseenQueue uriSink seenURISetVar uriTests mgr logFn
-
-        Stop -> do
-            -- Put poison pill back for other workers to consume (yuck!)
-            atomically $ unGetTQueue unseenQueue Stop
-            return ()
-
 hostName :: URI -> Maybe String
 hostName uri = uriRegName `fmap` uriAuthority uri
 
 satisfiesAll :: [a -> Bool] -> a -> Bool
 satisfiesAll preds x = all ($ x) preds
 
-forkWorkerThread :: IO () -> IO (MVar ())
-forkWorkerThread io = do
-    handle <- newEmptyMVar
-    _ <- forkFinally io (\_ -> putMVar handle ())
-    return handle
+visitURI :: Manager -> LogFn -> [URI -> Bool] -> TQueue [URI] -> TVar (S.Set URI) -> Pool URI -> URI -> IO ()
+visitURI mgr logFn uriTests resultQueue seenURISetVar _ uri = do
+    atomically $ modifyTVar seenURISetVar $ S.insert uri
 
-crawl :: URI -> [URI -> Bool] -> Int -> LogFn -> IO [URI]
-crawl uri uriTests numThreads logFn =
-    withSocketsDo $ bracket (newManager def) closeManager $ \mgr -> do
-        unseenQueue <- atomically newTQueue
-        (uriSink, uriSource) <- atomically newTPipe
-        seenURISetVar <- atomically $ newTVar S.empty
+    links <- getLinksForURL mgr uri
+    let acceptableLinks = S.fromList $ filter (satisfiesAll uriTests) links
 
-        let thread = workerThread unseenQueue uriSink seenURISetVar uriTests mgr logFn
-        threads <- mapM forkWorkerThread . replicate (max numThreads 1) $ thread
+    unseenLinks <- atomically $ do
+        seenURIs <- readTVar seenURISetVar
+        let unseen = acceptableLinks `S.difference` seenURIs
+        writeTVar seenURISetVar $ seenURIs `S.union` unseen
+        return unseen
 
-        links <- crawlURIs unseenQueue 0 uriSource [uri]
+    logFn $ "Crawled " ++ uriAsString uri ++ ", "
+                       ++ show (S.size acceptableLinks) ++ " links found, "
+                       ++ show (S.size unseenLinks) ++ " unseen"
 
-        atomically $ writeTQueue unseenQueue Stop
-        mapM_ takeMVar threads
+    atomically $ writeTQueue resultQueue (S.toList unseenLinks)
 
-        return links
-    where
-        crawlURIs unseenQueue unseenQueueLen uriSource uris = do
-            let newQueueLen = unseenQueueLen + length uris
-            if newQueueLen == 0
-                then return uris
-                else do
-                    mapM_ (atomically . writeTQueue unseenQueue . Scan) uris
-                    minedLinks <- atomically $ readTSource uriSource
-                    minedSubLinks <- crawlURIs unseenQueue (newQueueLen - 1) uriSource minedLinks
-                    return $ uris ++ minedSubLinks
+    return ()
+
+crawl :: Pool URI -> TQueue [URI] -> Int -> [URI] -> IO [URI]
+crawl threadPool resultQueue numQueuedURIs uris = do
+    let newNumQueuedURIs = numQueuedURIs + length uris
+    if newNumQueuedURIs == 0
+        then return uris
+        else do
+            mapM_ (ThreadPool.process threadPool) uris
+            foundURIs <- atomically $ readTQueue resultQueue
+            foundSubURIs <- crawl threadPool resultQueue (newNumQueuedURIs - 1) foundURIs
+            return $ foundURIs ++ foundSubURIs
+
 main :: IO ()
 main = do
     args <- Arg.parseArgs
@@ -168,10 +135,18 @@ main = do
             let httpTest = (`elem` ["http:", "https:"]) . uriScheme
             let hostTest = ((==) `on` hostName) uri
             let logFn = if (Arg.verbose args) then simpleLog else nullLog
-            logFn $ "Starting to crawl at " ++ Arg.url args ++ " with up to " ++ show (Arg.numParallelConnections args) ++ " threads"
-            links <- crawl uri [httpTest, hostTest] (Arg.numParallelConnections args) logFn
-            putStrLn $ "Got " ++ show (length links) ++ " links:"
-            putStr $ unlines $ map uriAsString links
-        Nothing -> putStrLn "Not a valid URI!"
+            let numThreads = Arg.numParallelConnections args
 
+            logFn $ "Starting to crawl at " ++ Arg.url args ++ " with up to " ++ show numThreads ++ " threads"
+
+            resultQueue <- atomically $ newTQueue
+            seenURIs <- atomically $ newTVar S.empty
+
+            withSocketsDo $ bracket (newManager def) closeManager $ \mgr -> do
+                threadPool <- ThreadPool.create numThreads (visitURI mgr logFn [httpTest, hostTest] resultQueue seenURIs)
+                links <- crawl threadPool resultQueue 0 [uri]
+                putStrLn $ "Got " ++ show (length links) ++ " links:"
+                putStr $ unlines $ map uriAsString links
+
+        Nothing -> putStrLn "Not a valid URI!"
 
